@@ -41,12 +41,15 @@ char* Format(char* output, const char* input, int size)
           snprintf_P(tmp, size, PSTR("%s%c0%dd"), output, '%', digits);
           snprintf_P(output, size, tmp, ESP_getChipId() & 0x1fff);            // %04d - short chip ID in dec, like in hostname
         } else {
-          snprintf_P(tmp, size, PSTR("%s%c0%dX"), output, '%', digits);
-          snprintf_P(output, size, tmp, ESP_getChipId());                   // %06X - full chip ID in hex
+          String mac_address = WiFi.macAddress();
+          mac_address.replace(":", "");
+          if (digits > 12) { digits = 12; }
+          String mac_part = mac_address.substring(12 - digits);
+          snprintf_P(output, size, PSTR("%s%s"), output, mac_part.c_str());  // %01X .. %12X - mac address in hex
         }
       } else {
         if (strchr(token, 'd')) {
-          snprintf_P(output, size, PSTR("%s%d"), output, ESP_getChipId());  // %d - full chip ID in dec
+          snprintf_P(output, size, PSTR("%s%d"), output, ESP_getChipId());   // %d - full chip ID in dec
           digits = 8;
         }
       }
@@ -222,8 +225,8 @@ void SetDevicePower(power_t rpower, uint32_t source)
   else if (EXS_RELAY == my_module_type) {
     SetLatchingRelay(rpower, 1);
   }
-  else
 #endif  // ESP8266
+  else
   {
     for (uint32_t i = 0; i < devices_present; i++) {
       power_t state = rpower &1;
@@ -336,6 +339,13 @@ void SetPowerOnState(void)
   blink_powersave = power;
 }
 
+void UpdateLedPowerAll()
+{
+	for (uint32_t i = 0; i < leds_present; i++) {
+		SetLedPowerIdx(i, bitRead(led_power, i));
+	}
+}
+
 void SetLedPowerIdx(uint32_t led, uint32_t state)
 {
   if (!PinUsed(GPIO_LEDLNK) && (0 == led)) {  // Legacy - LED1 is link led only if LED2 is present
@@ -351,7 +361,17 @@ void SetLedPowerIdx(uint32_t led, uint32_t state)
     } else {
       led_power &= (0xFF ^ mask);
     }
-    DigitalWrite(GPIO_LED1, led, bitRead(led_inverted, led) ? !state : state);
+    uint16_t pwm = 0;
+    if (bitRead(Settings.ledpwm_mask, led)) {
+#ifdef USE_LIGHT
+      pwm = changeUIntScale(ledGamma10(state ? Settings.ledpwm_on : Settings.ledpwm_off), 0, 1023, 0, Settings.pwm_range); // gamma corrected
+#else //USE_LIGHT
+      pwm = changeUIntScale((uint16_t)(state ? Settings.ledpwm_on : Settings.ledpwm_off), 0, 255, 0, Settings.pwm_range); // linear
+#endif //USE_LIGHT
+      analogWrite(Pin(GPIO_LED1, led), bitRead(led_inverted, led) ? Settings.pwm_range - pwm : pwm);
+    } else {
+      DigitalWrite(GPIO_LED1, led, bitRead(led_inverted, led) ? !state : state);
+    }
   }
 #ifdef USE_BUZZER
   if (led == 0) {
@@ -386,10 +406,9 @@ void SetLedLink(uint32_t state)
   uint32_t led_pin = Pin(GPIO_LEDLNK);
   uint32_t led_inv = ledlnk_inverted;
   if (99 == led_pin) {                    // Legacy - LED1 is status
-    led_pin = Pin(GPIO_LED1);
-    led_inv = bitRead(led_inverted, 0);
+    SetLedPowerIdx(0, state);
   }
-  if (led_pin < 99) {
+  else if (led_pin < 99) {
     if (state) { state = 1; }
     digitalWrite(led_pin, (led_inv) ? !state : state);
   }
@@ -552,7 +571,12 @@ void ExecuteCommandPower(uint32_t device, uint32_t state, uint32_t source)
       power ^= mask;
     }
 #ifdef USE_DEVICE_GROUPS
-    if (SRC_REMOTE != source && SRC_RETRY != source) SendLocalDeviceGroupMessage(DGR_MSGTYP_UPDATE, DGR_ITEM_POWER, power);
+    if (SRC_REMOTE != source && SRC_RETRY != source) {
+      if (Settings.flag4.remote_device_mode)  // SetOption88 - Enable relays in separate device groups
+        SendDeviceGroupMessage(device - 1, DGR_MSGTYP_UPDATE, DGR_ITEM_POWER, (power >> device - 1) & 1 | 0x01000000);  // Explicitly set number of relays to one
+      else
+        SendLocalDeviceGroupMessage(DGR_MSGTYP_UPDATE, DGR_ITEM_POWER, power);
+    }
 #endif  // USE_DEVICE_GROUPS
     SetDevicePower(power, source);
 #ifdef USE_DOMOTICZ
@@ -1275,16 +1299,23 @@ void SerialInput(void)
       }
     } else {
       if (serial_in_byte || Settings.flag.mqtt_serial_raw) {                     // Any char between 1 and 127 or any char (0 - 255) - CMND_SERIALSEND3
+        bool in_byte_is_delimiter =                                              // Char is delimiter when...
+          (((Settings.serial_delimiter < 128) && (serial_in_byte == Settings.serial_delimiter)) || // Any char between 1 and 127 and being delimiter
+          ((Settings.serial_delimiter == 128) && !isprint(serial_in_byte))) &&   // Any char not between 32 and 127
+          !Settings.flag.mqtt_serial_raw;                                        // In raw mode (CMND_SERIALSEND3) there is never a delimiter
+
         if ((serial_in_byte_counter < INPUT_BUFFER_SIZE -1) &&                   // Add char to string if it still fits and ...
-            ((isprint(serial_in_byte) && (128 == Settings.serial_delimiter)) ||  // Any char between 32 and 127
-            ((serial_in_byte != Settings.serial_delimiter) && (128 != Settings.serial_delimiter)) ||  // Any char between 1 and 127 and not being delimiter
-              Settings.flag.mqtt_serial_raw)) {                                  // Any char between 0 and 255 - CMND_SERIALSEND3
+            !in_byte_is_delimiter) {                                             // Char is not a delimiter
           serial_in_buffer[serial_in_byte_counter++] = serial_in_byte;
-          serial_polling_window = millis();
-        } else {
+        }
+
+        if ((serial_in_byte_counter >= INPUT_BUFFER_SIZE -1) ||                  // Send message when buffer is full or ...
+            in_byte_is_delimiter) {                                              // Char is delimiter
           serial_polling_window = 0;                                             // Reception done - send mqtt
           break;
         }
+
+        serial_polling_window = millis();                                        // Wait for next char
       }
     }
 
@@ -1322,12 +1353,23 @@ void SerialInput(void)
 
   if (Settings.flag.mqtt_serial && serial_in_byte_counter && (millis() > (serial_polling_window + SERIAL_POLLING))) {  // CMND_SERIALSEND and CMND_SERIALLOG
     serial_in_buffer[serial_in_byte_counter] = 0;                                // Serial data completed
-    char hex_char[(serial_in_byte_counter * 2) + 2];
     bool assume_json = (!Settings.flag.mqtt_serial_raw && (serial_in_buffer[0] == '{'));
-    Response_P(PSTR("{\"" D_JSON_SERIALRECEIVED "\":%s%s%s}"),
-      (assume_json) ? "" : "\"",
-      (Settings.flag.mqtt_serial_raw) ? ToHex_P((unsigned char*)serial_in_buffer, serial_in_byte_counter, hex_char, sizeof(hex_char)) : serial_in_buffer,
-      (assume_json) ? "" : "\"");
+
+    Response_P(PSTR("{\"" D_JSON_SERIALRECEIVED "\":"));
+    if (assume_json) {
+      ResponseAppend_P(serial_in_buffer);
+    } else {
+      ResponseAppend_P(PSTR("\""));
+      if (Settings.flag.mqtt_serial_raw) {
+        char hex_char[(serial_in_byte_counter * 2) + 2];
+        ResponseAppend_P(ToHex_P((unsigned char*)serial_in_buffer, serial_in_byte_counter, hex_char, sizeof(hex_char)));
+      } else {
+        ResponseAppend_P(EscapeJSONString(serial_in_buffer).c_str());
+      }
+      ResponseAppend_P(PSTR("\""));
+    }
+    ResponseJsonEnd();
+
     MqttPublishPrefixTopic_P(RESULT_OR_TELE, PSTR(D_JSON_SERIALRECEIVED));
     XdrvRulesProcess();
     serial_in_byte_counter = 0;
@@ -1430,6 +1472,12 @@ void GpioInit(void)
         ButtonInvertFlag(mpin - AGPIO(GPIO_KEY1_INV_NP));  //  0 .. 3
         mpin -= (AGPIO(GPIO_KEY1_INV_NP) - AGPIO(GPIO_KEY1));
       }
+#ifdef ESP32
+      else if ((mpin >= AGPIO(GPIO_KEY1_TC)) && (mpin < (AGPIO(GPIO_KEY1_TC) + MAX_KEYS))) {
+        ButtonTouchFlag(mpin - AGPIO(GPIO_KEY1_TC));  //  0 .. 3
+        mpin -= (AGPIO(GPIO_KEY1_TC) - AGPIO(GPIO_KEY1));
+      }
+#endif //ESP32
       else if ((mpin >= AGPIO(GPIO_REL1_INV)) && (mpin < (AGPIO(GPIO_REL1_INV) + MAX_RELAYS))) {
         bitSet(rel_inverted, mpin - AGPIO(GPIO_REL1_INV));
         mpin -= (AGPIO(GPIO_REL1_INV) - AGPIO(GPIO_REL1));

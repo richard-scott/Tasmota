@@ -107,7 +107,7 @@ typedef union {                            // Restricted by MISRA-C Rule 18.4 bu
     uint32_t device_groups_enabled : 1;    // bit 3 (v8.1.0.9)   - SetOption85 - Enable Device Groups
     uint32_t led_timeout : 1;              // bit 4 (v8.1.0.9)   - SetOption86 - PWM Dimmer Turn brightness LED's off 5 seconds after last change
     uint32_t powered_off_led : 1;          // bit 5 (v8.1.0.9)   - SetOption87 - PWM Dimmer Turn red LED on when powered off
-    uint32_t remote_device_mode : 1;       // bit 6 (v8.1.0.9)   - SetOption88 - PWM Dimmer Buttons control remote devices
+    uint32_t remote_device_mode : 1;       // bit 6 (v8.1.0.9)   - SetOption88 - Enable relays in separate device groups/PWM Dimmer Buttons control remote devices
     uint32_t zigbee_distinct_topics : 1;   // bit 7 (v8.1.0.10)  - SetOption89 - Distinct MQTT topics per device for Zigbee (#7835)
     uint32_t only_json_message : 1;        // bit 8 (v8.2.0.3)   - SetOption90 - Disable non-json MQTT response
     uint32_t fade_at_startup : 1;          // bit 9 (v8.2.0.3)   - SetOption91 - Enable light fading at start/power on
@@ -515,9 +515,7 @@ struct {
   uint8_t       ot_hot_water_setpoint;     // E8C
   uint8_t       ot_boiler_setpoint;        // E8D
   uint8_t       ot_flags;                  // E8E
-
-  uint8_t       free_e8f[1];               // E8F
-
+  uint8_t       ledpwm_mask;               // E8F
   uint16_t      dimmer_hw_min;             // E90
   uint16_t      dimmer_hw_max;             // E92
   uint32_t      deepsleep;                 // E94
@@ -569,8 +567,10 @@ struct {
   uint16_t      windmeter_pulse_debounce;  // F3A
   int16_t       windmeter_speed_factor;    // F3C
   uint8_t       windmeter_tele_pchange;    // F3E
+  uint8_t	      ledpwm_on;                 // F3F
+  uint8_t	      ledpwm_off;                // F40
 
-  uint8_t       free_f3f[121];             // F3F - Decrement if adding new Setting variables just above and below
+  uint8_t       free_f42[119];             // F41 - Decrement if adding new Setting variables just above and below
 
   // Only 32 bit boundary variables below
   uint16_t      pulse_counter_debounce_low;  // FB8
